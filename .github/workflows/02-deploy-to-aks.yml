@@ -1,0 +1,81 @@
+name: Deploy to AKS
+
+on:
+  workflow_run:
+    workflows:
+      - Build and Push Images to ACR
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Image tag to deploy. Use the build workflow run number, or latest.
+        required: true
+        default: latest
+
+env:
+  ACR_LOGIN_SERVER: azureakhilcicd.azurecr.io
+  IMAGE_PREFIX: example-voting-app
+  K8S_NAMESPACE: default
+
+jobs:
+  deploy:
+    name: Deploy images to AKS
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Select image tag
+        id: image
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.workflow_run.run_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AKS credentials
+        shell: bash
+        run: |
+          az aks get-credentials \
+            --resource-group "${{ secrets.AKS_RESOURCE_GROUP }}" \
+            --name "${{ secrets.AKS_CLUSTER_NAME }}" \
+            --overwrite-existing
+
+      - name: Deploy Kubernetes manifests
+        shell: bash
+        run: |
+          kubectl apply -n "$K8S_NAMESPACE" -f k8s-specifications/
+
+      - name: Update app images
+        shell: bash
+        run: |
+          IMAGE_TAG="${{ steps.image.outputs.tag }}"
+
+          kubectl set image deployment/vote \
+            vote="$ACR_LOGIN_SERVER/$IMAGE_PREFIX/vote:$IMAGE_TAG" \
+            -n "$K8S_NAMESPACE"
+
+          kubectl set image deployment/result \
+            result="$ACR_LOGIN_SERVER/$IMAGE_PREFIX/result:$IMAGE_TAG" \
+            -n "$K8S_NAMESPACE"
+
+          kubectl set image deployment/worker \
+            worker="$ACR_LOGIN_SERVER/$IMAGE_PREFIX/worker:$IMAGE_TAG" \
+            -n "$K8S_NAMESPACE"
+
+      - name: Verify rollout
+        shell: bash
+        run: |
+          kubectl rollout status deployment/vote -n "$K8S_NAMESPACE" --timeout=180s
+          kubectl rollout status deployment/result -n "$K8S_NAMESPACE" --timeout=180s
+          kubectl rollout status deployment/worker -n "$K8S_NAMESPACE" --timeout=180s

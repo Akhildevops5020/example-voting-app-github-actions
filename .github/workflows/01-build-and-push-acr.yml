@@ -9,7 +9,7 @@ on:
       - 'result/**'
       - 'worker/**'
       - 'seed-data/**'
-      - '.github/workflows/acr-build-push.yml'
+      - '.github/workflows/01-build-and-push-acr.yml'
   workflow_dispatch:
 
 env:
@@ -18,10 +18,11 @@ env:
 
 jobs:
   build-and-push:
-    name: Build and push Docker images
+    name: Build and push ${{ matrix.service }} image
     runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: true
       matrix:
         include:
           - service: vote
