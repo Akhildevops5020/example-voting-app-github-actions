@@ -1,0 +1,212 @@
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - vote/**
+      - result/**
+      - worker/**
+      - seed-data/**
+      - k8s-specifications/**
+      - azure-pipelines-production.yml
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  # Azure DevOps service connections.
+  dockerRegistryServiceConnection: 'CHANGE_ME_ACR_SERVICE_CONNECTION'
+  azureServiceConnection: 'CHANGE_ME_AZURE_RM_SERVICE_CONNECTION'
+
+  # Azure resources.
+  containerRegistry: 'azureakhilcicd.azurecr.io'
+  imagePrefix: 'example-voting-app'
+  aksResourceGroup: 'Voting-k8_group'
+  aksClusterName: 'voting-8'
+  k8sNamespace: 'default'
+
+  # Build metadata.
+  imageTag: '$(Build.SourceVersion)'
+  vmImageName: 'ubuntu-latest'
+
+stages:
+  - stage: Validate
+    displayName: Validate source and manifests
+    jobs:
+      - job: Validate
+        displayName: Validate Kubernetes manifests
+        pool:
+          vmImage: $(vmImageName)
+        steps:
+          - checkout: self
+
+          - script: |
+              set -euo pipefail
+              test -f vote/Dockerfile
+              test -f result/Dockerfile
+              test -f worker/Dockerfile
+              test -d k8s-specifications
+            displayName: Check required project files
+
+          - script: |
+              set -euo pipefail
+              kubectl apply --dry-run=client -f k8s-specifications/
+            displayName: Validate Kubernetes YAML syntax
+
+  - stage: Build
+    displayName: Build and push images
+    dependsOn: Validate
+    condition: succeeded()
+    jobs:
+      - job: Build
+        displayName: Build and push Docker images
+        pool:
+          vmImage: $(vmImageName)
+        steps:
+          - checkout: self
+
+          - task: Docker@2
+            displayName: Log in to ACR
+            inputs:
+              command: login
+              containerRegistry: $(dockerRegistryServiceConnection)
+
+          - script: |
+              set -euo pipefail
+
+              build_and_push() {
+                service="$1"
+                context="$2"
+                dockerfile="$3"
+                image="$(containerRegistry)/$(imagePrefix)/${service}"
+
+                DOCKER_BUILDKIT=1 docker build \
+                  --file "$dockerfile" \
+                  --tag "${image}:$(imageTag)" \
+                  --tag "${image}:latest" \
+                  "$context"
+
+                docker push "${image}:$(imageTag)"
+                docker push "${image}:latest"
+              }
+
+              build_and_push vote vote vote/Dockerfile
+              build_and_push result result result/Dockerfile
+              build_and_push worker worker worker/Dockerfile
+              build_and_push seed-data seed-data seed-data/Dockerfile
+            displayName: Build and push service images
+
+          - publish: k8s-specifications
+            artifact: manifests
+            displayName: Publish Kubernetes manifests
+
+  - stage: Deploy
+    displayName: Deploy to AKS
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: Deploy
+        displayName: Deploy application
+        environment: 'Votingapp-Production.default'
+        pool:
+          vmImage: $(vmImageName)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: manifests
+
+                - task: AzureCLI@2
+                  displayName: Connect to AKS
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      az aks get-credentials \
+                        --resource-group "$(aksResourceGroup)" \
+                        --name "$(aksClusterName)" \
+                        --overwrite-existing
+
+                - task: AzureCLI@2
+                  displayName: Apply Kubernetes manifests
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      kubectl apply \
+                        --namespace "$(k8sNamespace)" \
+                        --filename "$(Pipeline.Workspace)/manifests"
+
+                - task: AzureCLI@2
+                  displayName: Deploy image versions
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+
+                      kubectl set image deployment/vote \
+                        vote="$(containerRegistry)/$(imagePrefix)/vote:$(imageTag)" \
+                        --namespace "$(k8sNamespace)"
+
+                      kubectl set image deployment/result \
+                        result="$(containerRegistry)/$(imagePrefix)/result:$(imageTag)" \
+                        --namespace "$(k8sNamespace)"
+
+                      kubectl set image deployment/worker \
+                        worker="$(containerRegistry)/$(imagePrefix)/worker:$(imageTag)" \
+                        --namespace "$(k8sNamespace)"
+
+                - task: AzureCLI@2
+                  displayName: Verify rollout
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      kubectl rollout status deployment/vote --namespace "$(k8sNamespace)" --timeout=180s
+                      kubectl rollout status deployment/result --namespace "$(k8sNamespace)" --timeout=180s
+                      kubectl rollout status deployment/worker --namespace "$(k8sNamespace)" --timeout=180s
+
+  - stage: SmokeTest
+    displayName: Smoke test deployment
+    dependsOn: Deploy
+    condition: succeeded()
+    jobs:
+      - job: SmokeTest
+        displayName: Check Kubernetes resources
+        pool:
+          vmImage: $(vmImageName)
+        steps:
+          - task: AzureCLI@2
+            displayName: Verify pods and services
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                az aks get-credentials \
+                  --resource-group "$(aksResourceGroup)" \
+                  --name "$(aksClusterName)" \
+                  --overwrite-existing
+
+                kubectl get pods --namespace "$(k8sNamespace)"
+                kubectl get services --namespace "$(k8sNamespace)"
+
+                kubectl wait \
+                  --for=condition=available \
+                  deployment/vote deployment/result deployment/worker \
+                  --namespace "$(k8sNamespace)" \
+                  --timeout=180s

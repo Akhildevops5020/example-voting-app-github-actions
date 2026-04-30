@@ -1,0 +1,96 @@
+trigger: none
+
+pr: none
+
+parameters:
+  - name: imageTag
+    displayName: Image tag to deploy
+    type: string
+    default: latest
+
+variables:
+  # Azure Resource Manager service connection in Azure DevOps.
+  azureServiceConnection: 'CHANGE_ME_AZURE_SERVICE_CONNECTION'
+
+  # AKS details.
+  aksResourceGroup: 'CHANGE_ME_AKS_RESOURCE_GROUP'
+  aksClusterName: 'CHANGE_ME_AKS_CLUSTER_NAME'
+  kubernetesNamespace: 'default'
+
+  # ACR image details.
+  acrLoginServer: 'azureakhilcicd.azurecr.io'
+  imagePrefix: 'example-voting-app'
+
+  vmImageName: 'ubuntu-latest'
+
+stages:
+  - stage: Deploy
+    displayName: Deploy ACR images to AKS
+    jobs:
+      - job: Deploy
+        displayName: Deploy to AKS
+        pool:
+          vmImage: $(vmImageName)
+        steps:
+          - checkout: self
+
+          - task: AzureCLI@2
+            displayName: Get AKS credentials
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group "$(aksResourceGroup)" \
+                  --name "$(aksClusterName)" \
+                  --overwrite-existing
+
+          - task: AzureCLI@2
+            displayName: Apply Kubernetes manifests
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                kubectl apply \
+                  --namespace "$(kubernetesNamespace)" \
+                  --filename k8s-specifications/
+
+          - task: AzureCLI@2
+            displayName: Deploy ACR image tags
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                kubectl set image deployment/vote \
+                  vote="$(acrLoginServer)/$(imagePrefix)/vote:${{ parameters.imageTag }}" \
+                  --namespace "$(kubernetesNamespace)"
+
+                kubectl set image deployment/result \
+                  result="$(acrLoginServer)/$(imagePrefix)/result:${{ parameters.imageTag }}" \
+                  --namespace "$(kubernetesNamespace)"
+
+                kubectl set image deployment/worker \
+                  worker="$(acrLoginServer)/$(imagePrefix)/worker:${{ parameters.imageTag }}" \
+                  --namespace "$(kubernetesNamespace)"
+
+          - task: AzureCLI@2
+            displayName: Verify rollout
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                kubectl rollout status deployment/vote \
+                  --namespace "$(kubernetesNamespace)" \
+                  --timeout=180s
+
+                kubectl rollout status deployment/result \
+                  --namespace "$(kubernetesNamespace)" \
+                  --timeout=180s
+
+                kubectl rollout status deployment/worker \
+                  --namespace "$(kubernetesNamespace)" \
+                  --timeout=180s
