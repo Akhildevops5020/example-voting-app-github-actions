@@ -1,4 +1,4 @@
-name: Build and Push Images to ACR
+name: CI - Build and Push Images to ACR
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
       - 'result/**'
       - 'worker/**'
       - 'seed-data/**'
-      - '.github/workflows/01-build-and-push-acr.yml'
+      - '.github/workflows/ci.yml'
   workflow_dispatch:
 
 env:

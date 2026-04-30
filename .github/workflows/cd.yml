@@ -1,15 +1,15 @@
-name: Deploy to AKS
+name: CD - Deploy to AKS
 
 on:
   workflow_run:
     workflows:
-      - Build and Push Images to ACR
+      - CI - Build and Push Images to ACR
     types:
       - completed
   workflow_dispatch:
     inputs:
       image_tag:
-        description: Image tag to deploy. Use the build workflow run number, or latest.
+        description: Image tag to deploy. Use the CI workflow run number, or latest.
         required: true
         default: latest
 

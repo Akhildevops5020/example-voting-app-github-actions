@@ -1,0 +1,123 @@
+name: Infra - Create AKS with Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      terraform_action:
+        description: Terraform action to run
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+      resource_group_name:
+        description: Azure resource group for AKS
+        required: true
+        default: rg-voting-app-aks
+      location:
+        description: Azure region
+        required: true
+        default: centralindia
+      aks_cluster_name:
+        description: AKS cluster name
+        required: true
+        default: aks-voting-app
+      acr_name:
+        description: Azure Container Registry name without .azurecr.io
+        required: true
+        default: azureakhilcicd
+      acr_resource_group_name:
+        description: Resource group where the ACR exists. Use AKS resource group if creating a new ACR.
+        required: true
+        default: rg-voting-app-aks
+      create_acr:
+        description: Create a new ACR instead of using an existing one
+        required: true
+        default: false
+        type: boolean
+
+env:
+  TF_WORKING_DIR: infra/terraform/aks
+  TF_IN_AUTOMATION: true
+  TF_VAR_resource_group_name: ${{ inputs.resource_group_name }}
+  TF_VAR_location: ${{ inputs.location }}
+  TF_VAR_aks_cluster_name: ${{ inputs.aks_cluster_name }}
+  TF_VAR_acr_name: ${{ inputs.acr_name }}
+  TF_VAR_acr_resource_group_name: ${{ inputs.acr_resource_group_name }}
+  TF_VAR_create_acr: ${{ inputs.create_acr }}
+
+jobs:
+  terraform:
+    name: Terraform ${{ inputs.terraform_action }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: Ensure Terraform remote state exists
+        shell: bash
+        run: |
+          az group create \
+            --name "${{ secrets.TF_STATE_RESOURCE_GROUP }}" \
+            --location "${{ inputs.location }}"
+
+          az storage account create \
+            --name "${{ secrets.TF_STATE_STORAGE_ACCOUNT }}" \
+            --resource-group "${{ secrets.TF_STATE_RESOURCE_GROUP }}" \
+            --location "${{ inputs.location }}" \
+            --sku Standard_LRS \
+            --kind StorageV2
+
+          ACCOUNT_KEY="$(az storage account keys list \
+            --resource-group "${{ secrets.TF_STATE_RESOURCE_GROUP }}" \
+            --account-name "${{ secrets.TF_STATE_STORAGE_ACCOUNT }}" \
+            --query '[0].value' \
+            --output tsv)"
+
+          az storage container create \
+            --name "${{ secrets.TF_STATE_CONTAINER }}" \
+            --account-name "${{ secrets.TF_STATE_STORAGE_ACCOUNT }}" \
+            --account-key "$ACCOUNT_KEY"
+
+      - name: Terraform fmt
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ secrets.TF_STATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ secrets.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ secrets.TF_STATE_CONTAINER }}" \
+            -backend-config="key=aks.tfstate"
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate
+
+      - name: Terraform plan
+        if: ${{ inputs.terraform_action == 'plan' || inputs.terraform_action == 'apply' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform plan -out=tfplan
+
+      - name: Terraform apply
+        if: ${{ inputs.terraform_action == 'apply' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform apply -auto-approve tfplan
+
+      - name: Terraform destroy
+        if: ${{ inputs.terraform_action == 'destroy' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform destroy -auto-approve
