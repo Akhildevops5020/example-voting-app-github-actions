@@ -1,0 +1,12 @@
+resource_group_name      = "Voting-k8_group"
+location                 = "centralindia"
+aks_cluster_name         = "voting-8"
+dns_prefix               = "voting-app"
+node_count               = 2
+node_vm_size             = "Standard_B2s"
+
+# Existing ACR details.
+create_acr              = false
+acr_name                = "azureakhilcicd"
+acr_resource_group_name = "CHANGE_ME_ACR_RESOURCE_GROUP"
+
